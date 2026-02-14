@@ -1,0 +1,309 @@
+#!/usr/bin/env python3
+"""HDR tray controller for KDE Plasma.
+
+Shows a persistent status notifier icon in the system tray and exposes
+right-click actions for HDR control.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("AppIndicator3", "0.1")
+from gi.repository import AppIndicator3, GLib, Gtk
+
+
+APP_ID = "hdr-switcher-tray"
+APP_NAME = "HDR Switcher Tray"
+DEFAULT_OFF_BRIGHTNESS = 100
+BRIGHTNESS_PRESETS = [100, 95, 90, 85, 80]
+CONFIG_DIR = Path.home() / ".config" / "hdr-switcher"
+CONFIG_FILE = CONFIG_DIR / "config.json"
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="hdr-switcher-tray",
+        description="System tray HDR controller for KDE Plasma.",
+    )
+    parser.add_argument(
+        "--no-notify",
+        action="store_true",
+        help="Suppress notifications from hdr-switcher actions.",
+    )
+    parser.add_argument(
+        "--refresh-seconds",
+        type=int,
+        default=8,
+        metavar="N",
+        help="Polling interval for state refresh (default: 8).",
+    )
+    return parser
+
+
+def find_hdr_switcher() -> str:
+    candidates: list[Path] = []
+    env = os.environ.get("HDR_SWITCHER_BIN")
+    if env:
+        candidates.append(Path(env))
+    candidates.append(Path(__file__).resolve().with_name("hdr-switcher"))
+    candidates.append(Path.home() / ".local/bin/hdr-switcher")
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    found = shutil.which("hdr-switcher")
+    if found:
+        return found
+    raise RuntimeError("Unable to locate hdr-switcher binary.")
+
+
+def icon_for_state(state: str) -> str | None:
+    icon_name = "hdr-on.png" if state == "on" else "hdr-off.png"
+    env_icon_dir = os.environ.get("HDR_SWITCHER_ICON_DIR")
+    search_paths: list[Path] = []
+    if env_icon_dir:
+        search_paths.append(Path(env_icon_dir))
+    search_paths.append(Path.home() / ".local/share/hdr-switcher/images")
+    search_paths.append(Path(__file__).resolve().parent.parent / "images")
+    for icon_dir in search_paths:
+        icon_path = icon_dir / icon_name
+        if icon_path.is_file():
+            return str(icon_path)
+    return None
+
+
+def parse_state(output: str) -> str:
+    text = output.upper()
+    if "HDR STATE: ON" in text:
+        return "on"
+    if "HDR STATE: MIXED" in text:
+        return "mixed"
+    if "HDR STATE: OFF" in text:
+        return "off"
+    return "none"
+
+
+def load_settings() -> dict[str, int]:
+    settings = {"off_brightness": DEFAULT_OFF_BRIGHTNESS}
+    try:
+        payload = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        value = int(payload.get("off_brightness", DEFAULT_OFF_BRIGHTNESS))
+        if 0 <= value <= 100:
+            settings["off_brightness"] = value
+    except (FileNotFoundError, OSError, ValueError, TypeError, json.JSONDecodeError):
+        pass
+    return settings
+
+
+def save_settings(settings: dict[str, int]) -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.write_text(f"{json.dumps(settings, indent=2)}\n", encoding="utf-8")
+
+
+class HdrTray:
+    def __init__(self, switcher_path: str, notify_enabled: bool, refresh_seconds: int) -> None:
+        self.switcher_path = switcher_path
+        self.notify_enabled = notify_enabled
+        self.refresh_seconds = max(2, refresh_seconds)
+        self.settings = load_settings()
+        self.off_brightness = int(self.settings.get("off_brightness", DEFAULT_OFF_BRIGHTNESS))
+        if not 0 <= self.off_brightness <= 100:
+            self.off_brightness = DEFAULT_OFF_BRIGHTNESS
+        self._updating_radios = False
+
+        self.indicator = AppIndicator3.Indicator.new(
+            APP_ID,
+            "video-display",
+            AppIndicator3.IndicatorCategory.APPLICATION_STATUS,
+        )
+        self.indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
+        self.indicator.set_title(APP_NAME)
+
+        self.menu = Gtk.Menu()
+        self.state_item = Gtk.MenuItem(label="HDR: unknown")
+        self.state_item.set_sensitive(False)
+        self.menu.append(self.state_item)
+        self.menu.append(Gtk.SeparatorMenuItem())
+
+        self.enable_item = Gtk.MenuItem(label="Enable HDR")
+        self.enable_item.connect("activate", self._on_action, "on")
+        self.menu.append(self.enable_item)
+
+        self.disable_item = Gtk.MenuItem(label="Disable HDR")
+        self.disable_item.connect("activate", self._on_action, "off")
+        self.menu.append(self.disable_item)
+
+        self.toggle_item = Gtk.MenuItem(label="Toggle HDR")
+        self.toggle_item.connect("activate", self._on_action, "toggle")
+        self.menu.append(self.toggle_item)
+
+        self.settings_item = Gtk.MenuItem(label="Settings")
+        self.settings_menu = Gtk.Menu()
+        self.settings_item.set_submenu(self.settings_menu)
+        self.menu.append(self.settings_item)
+
+        self.brightness_info_item = Gtk.MenuItem(label="")
+        self.brightness_info_item.set_sensitive(False)
+        self.settings_menu.append(self.brightness_info_item)
+        self.settings_menu.append(Gtk.SeparatorMenuItem())
+
+        self.preset_items: dict[int, Gtk.RadioMenuItem] = {}
+        group: Gtk.RadioMenuItem | None = None
+        for value in BRIGHTNESS_PRESETS:
+            if group is None:
+                item = Gtk.RadioMenuItem.new_with_label(None, f"{value}%")
+                group = item
+            else:
+                item = Gtk.RadioMenuItem.new_with_label_from_widget(group, f"{value}%")
+            item.connect("toggled", self._on_preset_toggled, value)
+            self.settings_menu.append(item)
+            self.preset_items[value] = item
+
+        self.settings_menu.append(Gtk.SeparatorMenuItem())
+        self.custom_brightness_item = Gtk.MenuItem(label="Set Custom...")
+        self.custom_brightness_item.connect("activate", self._on_custom_brightness)
+        self.settings_menu.append(self.custom_brightness_item)
+
+        self.refresh_item = Gtk.MenuItem(label="Refresh Status")
+        self.refresh_item.connect("activate", self._on_refresh)
+        self.menu.append(self.refresh_item)
+
+        self.menu.append(Gtk.SeparatorMenuItem())
+        self.quit_item = Gtk.MenuItem(label="Quit")
+        self.quit_item.connect("activate", self._on_quit)
+        self.menu.append(self.quit_item)
+
+        self.menu.show_all()
+        self.indicator.set_menu(self.menu)
+
+        self._sync_settings_menu()
+        self.refresh_state()
+        GLib.timeout_add_seconds(self.refresh_seconds, self._periodic_refresh)
+
+    def _run(self, args: list[str]) -> tuple[int, str]:
+        try:
+            res = subprocess.run(
+                [self.switcher_path, *args],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except OSError as exc:
+            return 127, str(exc)
+        output = (res.stdout or "").strip()
+        err = (res.stderr or "").strip()
+        return res.returncode, output if output else err
+
+    def refresh_state(self) -> None:
+        code, text = self._run(["status", "--no-notify"])
+        state = parse_state(text)
+        self._set_icon(state)
+        if code == 0:
+            self.state_item.set_label(f"HDR: {state.upper()}")
+        elif text:
+            self.state_item.set_label(f"HDR: {text}")
+        else:
+            self.state_item.set_label("HDR: unavailable")
+
+    def _set_icon(self, state: str) -> None:
+        icon_path = icon_for_state("on" if state == "on" else "off")
+        if icon_path:
+            self.indicator.set_icon_full(icon_path, f"HDR {state}")
+        else:
+            self.indicator.set_icon_full("video-display", f"HDR {state}")
+
+    def _on_action(self, _menu_item: Gtk.MenuItem, action: str) -> None:
+        args = [action]
+        if action in {"off", "toggle"}:
+            args.extend(["--off-brightness", str(self.off_brightness)])
+        if not self.notify_enabled:
+            args.append("--no-notify")
+        self._run(args)
+        self.refresh_state()
+
+    def _on_refresh(self, _menu_item: Gtk.MenuItem) -> None:
+        self.refresh_state()
+
+    def _periodic_refresh(self) -> bool:
+        self.refresh_state()
+        return True
+
+    def _sync_settings_menu(self) -> None:
+        self.brightness_info_item.set_label(f"HDR-off brightness: {self.off_brightness}%")
+        self._updating_radios = True
+        for value, item in self.preset_items.items():
+            item.set_active(value == self.off_brightness)
+        self._updating_radios = False
+
+    def _set_off_brightness(self, value: int) -> None:
+        if not 0 <= value <= 100:
+            return
+        self.off_brightness = value
+        self.settings["off_brightness"] = value
+        try:
+            save_settings(self.settings)
+        except OSError:
+            pass
+        self._sync_settings_menu()
+
+    def _on_preset_toggled(self, menu_item: Gtk.RadioMenuItem, value: int) -> None:
+        if self._updating_radios or not menu_item.get_active():
+            return
+        self._set_off_brightness(value)
+
+    def _prompt_custom_brightness(self, current: int) -> int | None:
+        dialog = Gtk.Dialog(title="HDR Off Brightness", flags=0)
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Save", Gtk.ResponseType.OK)
+        content = dialog.get_content_area()
+        label = Gtk.Label(label="Set brightness percent used when HDR is off (0-100):")
+        label.set_halign(Gtk.Align.START)
+        spin = Gtk.SpinButton.new_with_range(0, 100, 1)
+        spin.set_value(float(current))
+        spin.set_numeric(True)
+        content.pack_start(label, False, False, 6)
+        content.pack_start(spin, False, False, 6)
+        dialog.show_all()
+        response = dialog.run()
+        value = int(spin.get_value()) if response == Gtk.ResponseType.OK else None
+        dialog.destroy()
+        return value
+
+    def _on_custom_brightness(self, _menu_item: Gtk.MenuItem) -> None:
+        value = self._prompt_custom_brightness(self.off_brightness)
+        if value is None:
+            return
+        self._set_off_brightness(value)
+
+    def _on_quit(self, _menu_item: Gtk.MenuItem) -> None:
+        Gtk.main_quit()
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    try:
+        switcher = find_hdr_switcher()
+    except RuntimeError as exc:
+        print(f"{APP_NAME}: {exc}", file=sys.stderr)
+        return 2
+
+    HdrTray(
+        switcher_path=switcher,
+        notify_enabled=not args.no_notify,
+        refresh_seconds=args.refresh_seconds,
+    )
+    Gtk.main()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

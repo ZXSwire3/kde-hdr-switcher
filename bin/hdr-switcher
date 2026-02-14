@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+"""Toggle HDR on KDE Plasma outputs through kscreen-doctor.
+
+Designed for panel launcher actions on immutable systems like Bazzite:
+- no root required
+- installs into ~/.local
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+
+APP_NAME = "HDR Switcher"
+DEFAULT_OFF_BRIGHTNESS = 100
+CONFIG_DIR = Path.home() / ".config" / "hdr-switcher"
+CONFIG_FILE = CONFIG_DIR / "config.json"
+
+
+@dataclass
+class HdrOutput:
+    name: str
+    enabled: bool
+    connected: bool
+    hdr: bool
+    brightness_supported: bool
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="hdr-switcher",
+        description="Enable, disable, or toggle HDR for connected KDE outputs.",
+    )
+    parser.add_argument(
+        "action",
+        nargs="?",
+        default="toggle",
+        choices=["on", "off", "toggle", "status", "list"],
+        help="Action to run (default: toggle).",
+    )
+    parser.add_argument(
+        "--no-notify",
+        action="store_true",
+        help="Disable desktop notifications.",
+    )
+    parser.add_argument(
+        "--off-brightness",
+        type=int,
+        default=None,
+        metavar="PCT",
+        help="When HDR is off, set brightness percent (0-100). Overrides settings file.",
+    )
+    parser.add_argument(
+        "--no-off-brightness",
+        action="store_true",
+        help="Do not change brightness when switching HDR off.",
+    )
+    return parser
+
+
+def load_off_brightness() -> int:
+    try:
+        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        value = int(data.get("off_brightness", DEFAULT_OFF_BRIGHTNESS))
+        if 0 <= value <= 100:
+            return value
+    except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError, TypeError):
+        pass
+    return DEFAULT_OFF_BRIGHTNESS
+
+
+def icon_for_state(state: str) -> str | None:
+    icon_name = "hdr-on.png" if state == "on" else "hdr-off.png"
+    env_icon_dir = os.environ.get("HDR_SWITCHER_ICON_DIR")
+    search_paths: list[Path] = []
+    if env_icon_dir:
+        search_paths.append(Path(env_icon_dir))
+    search_paths.append(Path.home() / ".local/share/hdr-switcher/images")
+    search_paths.append(Path(__file__).resolve().parent.parent / "images")
+    for icon_dir in search_paths:
+        icon_path = icon_dir / icon_name
+        if icon_path.is_file():
+            return str(icon_path)
+    return None
+
+
+def notify(summary: str, body: str, disabled: bool, state: str = "off") -> None:
+    if disabled:
+        return
+    notify_bin = shutil.which("notify-send")
+    if not notify_bin:
+        return
+    icon_path = icon_for_state(state)
+    cmd = [notify_bin, "-a", APP_NAME]
+    if icon_path:
+        cmd += ["-i", icon_path]
+    cmd += [summary, body]
+    subprocess.run(
+        cmd,
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def run_kscreen(args: list[str]) -> str:
+    binary = shutil.which("kscreen-doctor")
+    if not binary:
+        raise RuntimeError("kscreen-doctor is not installed or not in PATH.")
+    result = subprocess.run(
+        [binary, *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout
+
+
+def read_hdr_outputs() -> list[HdrOutput]:
+    raw = run_kscreen(["--json"])
+    payload = json.loads(raw)
+    outputs = payload.get("outputs", [])
+    hdr_outputs: list[HdrOutput] = []
+    for out in outputs:
+        if "hdr" not in out:
+            continue
+        hdr_outputs.append(
+            HdrOutput(
+                name=str(out.get("name", "")),
+                enabled=bool(out.get("enabled", False)),
+                connected=bool(out.get("connected", False)),
+                hdr=bool(out.get("hdr", False)),
+                brightness_supported="brightness" in out,
+            )
+        )
+    return [o for o in hdr_outputs if o.name and o.enabled and o.connected]
+
+
+def describe_state(outputs: list[HdrOutput]) -> str:
+    if not outputs:
+        return "none"
+    states = [o.hdr for o in outputs]
+    if all(states):
+        return "on"
+    if any(states):
+        return "mixed"
+    return "off"
+
+
+def state_line(outputs: list[HdrOutput]) -> str:
+    state = describe_state(outputs)
+    names = ", ".join(o.name for o in outputs) if outputs else "-"
+    return f"HDR state: {state.upper()} (outputs: {names})"
+
+
+def apply_action(action: str, outputs: list[HdrOutput]) -> None:
+    action_map = {"on": "enable", "off": "disable", "toggle": "toggle"}
+    k_action = action_map[action]
+    cmd = ["kscreen-doctor"] + [f"output.{o.name}.hdr.{k_action}" for o in outputs]
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+
+
+def apply_off_brightness(outputs: list[HdrOutput], percent: int) -> tuple[list[str], list[str]]:
+    off_outputs = [o for o in outputs if not o.hdr]
+    supported = [o for o in off_outputs if o.brightness_supported]
+    unsupported = [o.name for o in off_outputs if not o.brightness_supported]
+    if supported:
+        cmd = ["kscreen-doctor"] + [f"output.{o.name}.brightness.{percent}" for o in supported]
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    return [o.name for o in supported], unsupported
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    off_brightness = load_off_brightness() if args.off_brightness is None else args.off_brightness
+    if not args.no_off_brightness and not 0 <= off_brightness <= 100:
+        parser.error("--off-brightness must be between 0 and 100")
+
+    try:
+        outputs = read_hdr_outputs()
+    except json.JSONDecodeError as exc:
+        print(f"{APP_NAME}: failed to parse kscreen-doctor JSON output: {exc}", file=sys.stderr)
+        return 4
+    except (OSError, subprocess.CalledProcessError, RuntimeError) as exc:
+        print(f"{APP_NAME}: {exc}", file=sys.stderr)
+        notify("HDR command failed", str(exc), args.no_notify, "off")
+        return 3
+
+    if args.action == "list":
+        if not outputs:
+            print("No connected, enabled HDR-capable outputs found.")
+            return 2
+        for out in outputs:
+            print(f"{out.name}\t{'on' if out.hdr else 'off'}")
+        return 0
+
+    if args.action == "status":
+        message = state_line(outputs)
+        state = describe_state(outputs)
+        print(message)
+        notify("HDR status", message, args.no_notify, state)
+        return 0 if outputs else 2
+
+    if not outputs:
+        message = "No connected, enabled HDR-capable outputs found."
+        print(message, file=sys.stderr)
+        notify("HDR not changed", message, args.no_notify, "off")
+        return 2
+
+    brightness_note = ""
+    try:
+        apply_action(args.action, outputs)
+        updated = read_hdr_outputs()
+        brightness_applied: list[str] = []
+        brightness_unsupported: list[str] = []
+        if args.action in {"off", "toggle"} and not args.no_off_brightness:
+            brightness_applied, brightness_unsupported = apply_off_brightness(updated, off_brightness)
+            if brightness_applied:
+                brightness_note = f"Brightness set to {off_brightness}% on: {', '.join(brightness_applied)}"
+            if brightness_unsupported:
+                extra = f"Brightness control unavailable on: {', '.join(brightness_unsupported)}"
+                brightness_note = f"{brightness_note} | {extra}" if brightness_note else extra
+    except (OSError, subprocess.CalledProcessError, RuntimeError, json.JSONDecodeError) as exc:
+        print(f"{APP_NAME}: failed to apply action: {exc}", file=sys.stderr)
+        notify("HDR command failed", str(exc), args.no_notify, describe_state(outputs))
+        return 4
+
+    message = state_line(updated)
+    if brightness_note:
+        message = f"{message} | {brightness_note}"
+    state = describe_state(updated)
+    print(message)
+    notify("HDR updated", message, args.no_notify, state)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

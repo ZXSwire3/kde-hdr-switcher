@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=HDR Switcher Tray
+Comment=System tray HDR control for KDE displays
+Exec=@HDR_SWITCHER_TRAY_PATH@
+Icon=@HDR_OFF_ICON@
+Terminal=false
+Categories=Utility;Settings;
+StartupNotify=false

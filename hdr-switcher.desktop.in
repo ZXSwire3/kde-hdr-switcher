@@ -1,0 +1,30 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=HDR Switcher
+Comment=Toggle HDR mode for KDE displays
+Exec=@HDR_SWITCHER_PATH@ toggle
+Icon=@HDR_OFF_ICON@
+Terminal=false
+Categories=Utility;Settings;
+Actions=EnableHDR;DisableHDR;ToggleHDR;StatusHDR;
+
+[Desktop Action EnableHDR]
+Name=Enable HDR
+Exec=@HDR_SWITCHER_PATH@ on
+Icon=@HDR_ON_ICON@
+
+[Desktop Action DisableHDR]
+Name=Disable HDR
+Exec=@HDR_SWITCHER_PATH@ off
+Icon=@HDR_OFF_ICON@
+
+[Desktop Action ToggleHDR]
+Name=Toggle HDR
+Exec=@HDR_SWITCHER_PATH@ toggle
+Icon=@HDR_ON_ICON@
+
+[Desktop Action StatusHDR]
+Name=Show HDR Status
+Exec=@HDR_SWITCHER_PATH@ status
+Icon=@HDR_OFF_ICON@

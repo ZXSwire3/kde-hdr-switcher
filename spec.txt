@@ -1,0 +1,1 @@
+I am running kde on bazzite and everything is up to date. I want to create a taskbar program for the panel that will allow to right click and easily turn on and off hdr mode in kde. 
