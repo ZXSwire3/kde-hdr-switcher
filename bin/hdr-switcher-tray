@@ -92,21 +92,35 @@ def parse_state(output: str) -> str:
     return "none"
 
 
-def load_settings() -> dict[str, int]:
-    settings = {"off_brightness": DEFAULT_OFF_BRIGHTNESS}
+def load_settings() -> dict:
+    settings: dict = {"off_brightness": DEFAULT_OFF_BRIGHTNESS, "on_brightness": None}
     try:
         payload = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        value = int(payload.get("off_brightness", DEFAULT_OFF_BRIGHTNESS))
-        if 0 <= value <= 100:
-            settings["off_brightness"] = value
+        off_raw = payload.get("off_brightness", DEFAULT_OFF_BRIGHTNESS)
+        try:
+            off_val = int(off_raw)
+            if 0 <= off_val <= 100:
+                settings["off_brightness"] = off_val
+        except (TypeError, ValueError):
+            pass
+        on_raw = payload.get("on_brightness")
+        if on_raw is not None:
+            try:
+                on_val = int(on_raw)
+                if 0 <= on_val <= 100:
+                    settings["on_brightness"] = on_val
+            except (TypeError, ValueError):
+                pass
     except (FileNotFoundError, OSError, ValueError, TypeError, json.JSONDecodeError):
         pass
     return settings
 
 
-def save_settings(settings: dict[str, int]) -> None:
+def save_settings(settings: dict) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    CONFIG_FILE.write_text(f"{json.dumps(settings, indent=2)}\n", encoding="utf-8")
+    # Omit keys whose value is None so the config file stays clean
+    to_save = {k: v for k, v in settings.items() if v is not None}
+    CONFIG_FILE.write_text(f"{json.dumps(to_save, indent=2)}\n", encoding="utf-8")
 
 
 class HdrTray:
@@ -118,6 +132,9 @@ class HdrTray:
         self.off_brightness = int(self.settings.get("off_brightness", DEFAULT_OFF_BRIGHTNESS))
         if not 0 <= self.off_brightness <= 100:
             self.off_brightness = DEFAULT_OFF_BRIGHTNESS
+        self.on_brightness: int | None = self.settings.get("on_brightness")
+        if self.on_brightness is not None and not 0 <= self.on_brightness <= 100:
+            self.on_brightness = None
         self._updating_radios = False
 
         self.indicator = AppIndicator3.Indicator.new(
@@ -151,6 +168,7 @@ class HdrTray:
         self.settings_item.set_submenu(self.settings_menu)
         self.menu.append(self.settings_item)
 
+        # --- HDR-off brightness section ---
         self.brightness_info_item = Gtk.MenuItem(label="")
         self.brightness_info_item.set_sensitive(False)
         self.settings_menu.append(self.brightness_info_item)
@@ -172,6 +190,33 @@ class HdrTray:
         self.custom_brightness_item = Gtk.MenuItem(label="Set Custom...")
         self.custom_brightness_item.connect("activate", self._on_custom_brightness)
         self.settings_menu.append(self.custom_brightness_item)
+
+        # --- HDR-on brightness section ---
+        self.settings_menu.append(Gtk.SeparatorMenuItem())
+        self.on_brightness_info_item = Gtk.MenuItem(label="")
+        self.on_brightness_info_item.set_sensitive(False)
+        self.settings_menu.append(self.on_brightness_info_item)
+        self.settings_menu.append(Gtk.SeparatorMenuItem())
+
+        self.on_preset_items: dict[int | None, Gtk.RadioMenuItem] = {}
+        on_group: Gtk.RadioMenuItem | None = None
+        # "Disabled" option (None sentinel)
+        disabled_item = Gtk.RadioMenuItem.new_with_label(None, "Disabled")
+        on_group = disabled_item
+        disabled_item.connect("toggled", self._on_on_preset_toggled, None)
+        self.settings_menu.append(disabled_item)
+        self.on_preset_items[None] = disabled_item
+
+        for value in BRIGHTNESS_PRESETS:
+            item = Gtk.RadioMenuItem.new_with_label_from_widget(on_group, f"{value}%")
+            item.connect("toggled", self._on_on_preset_toggled, value)
+            self.settings_menu.append(item)
+            self.on_preset_items[value] = item
+
+        self.settings_menu.append(Gtk.SeparatorMenuItem())
+        self.on_custom_brightness_item = Gtk.MenuItem(label="Set Custom...")
+        self.on_custom_brightness_item.connect("activate", self._on_custom_on_brightness)
+        self.settings_menu.append(self.on_custom_brightness_item)
 
         self.refresh_item = Gtk.MenuItem(label="Refresh Status")
         self.refresh_item.connect("activate", self._on_refresh)
@@ -225,6 +270,11 @@ class HdrTray:
         args = [action]
         if action in {"off", "toggle"}:
             args.extend(["--off-brightness", str(self.off_brightness)])
+        if action in {"on", "toggle"}:
+            if self.on_brightness is not None:
+                args.extend(["--on-brightness", str(self.on_brightness)])
+            else:
+                args.append("--no-on-brightness")
         if not self.notify_enabled:
             args.append("--no-notify")
         self._run(args)
@@ -239,9 +289,13 @@ class HdrTray:
 
     def _sync_settings_menu(self) -> None:
         self.brightness_info_item.set_label(f"HDR-off brightness: {self.off_brightness}%")
+        on_label = f"{self.on_brightness}%" if self.on_brightness is not None else "Disabled"
+        self.on_brightness_info_item.set_label(f"HDR-on brightness: {on_label}")
         self._updating_radios = True
         for value, item in self.preset_items.items():
             item.set_active(value == self.off_brightness)
+        for value, item in self.on_preset_items.items():
+            item.set_active(value == self.on_brightness)
         self._updating_radios = False
 
     def _set_off_brightness(self, value: int) -> None:
@@ -255,10 +309,26 @@ class HdrTray:
             pass
         self._sync_settings_menu()
 
+    def _set_on_brightness(self, value: int | None) -> None:
+        if value is not None and not 0 <= value <= 100:
+            return
+        self.on_brightness = value
+        self.settings["on_brightness"] = value
+        try:
+            save_settings(self.settings)
+        except OSError:
+            pass
+        self._sync_settings_menu()
+
     def _on_preset_toggled(self, menu_item: Gtk.RadioMenuItem, value: int) -> None:
         if self._updating_radios or not menu_item.get_active():
             return
         self._set_off_brightness(value)
+
+    def _on_on_preset_toggled(self, menu_item: Gtk.RadioMenuItem, value: int | None) -> None:
+        if self._updating_radios or not menu_item.get_active():
+            return
+        self._set_on_brightness(value)
 
     def _prompt_custom_brightness(self, current: int) -> int | None:
         dialog = Gtk.Dialog(title="HDR Off Brightness", flags=0)
@@ -283,6 +353,30 @@ class HdrTray:
         if value is None:
             return
         self._set_off_brightness(value)
+
+    def _prompt_custom_on_brightness(self, current: int | None) -> int | None:
+        dialog = Gtk.Dialog(title="HDR On Brightness", flags=0)
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Save", Gtk.ResponseType.OK)
+        content = dialog.get_content_area()
+        label = Gtk.Label(label="Set brightness percent used when HDR is on (0-100):")
+        label.set_halign(Gtk.Align.START)
+        spin = Gtk.SpinButton.new_with_range(0, 100, 1)
+        spin.set_value(float(current if current is not None else DEFAULT_OFF_BRIGHTNESS))
+        spin.set_numeric(True)
+        content.pack_start(label, False, False, 6)
+        content.pack_start(spin, False, False, 6)
+        dialog.show_all()
+        response = dialog.run()
+        value = int(spin.get_value()) if response == Gtk.ResponseType.OK else None
+        dialog.destroy()
+        return value
+
+    def _on_custom_on_brightness(self, _menu_item: Gtk.MenuItem) -> None:
+        value = self._prompt_custom_on_brightness(self.on_brightness)
+        if value is None:
+            return
+        self._set_on_brightness(value)
 
     def _on_quit(self, _menu_item: Gtk.MenuItem) -> None:
         Gtk.main_quit()
