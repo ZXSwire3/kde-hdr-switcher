@@ -12,7 +12,8 @@ It is built around KDE's `kscreen-doctor`, so it uses Plasma's native display co
 - Optional status notifications with custom HDR on/off icons.
 - Automatic brightness handling when HDR is off (default: `100%`).
 - Optional brightness setting when HDR is on (disabled by default; configure in settings).
-- Tray settings menu to configure HDR-off and HDR-on brightness and persist them.
+- Optional Night Light suspension when HDR is on (disabled by default; configure in settings or via `--suspend-night-light`).
+- Tray settings menu to configure HDR-off and HDR-on brightness, Night Light suspension, and persist them.
 - User-local install (`~/.local`), no root required.
 
 ## Requirements
@@ -78,6 +79,8 @@ hdr-switcher off --off-brightness 85
 hdr-switcher on --on-brightness 80
 hdr-switcher toggle --no-off-brightness
 hdr-switcher toggle --no-on-brightness
+hdr-switcher on --suspend-night-light
+hdr-switcher off --no-suspend-night-light
 hdr-switcher status --no-notify
 ```
 
@@ -120,15 +123,18 @@ Current keys:
 ```json
 {
   "off_brightness": 100,
-  "on_brightness": 80
+  "on_brightness": 80,
+  "suspend_night_light": false
 }
 ```
 
 Behavior:
 - `off_brightness` is used when HDR is switched off (via `off` or `toggle` landing in off).
 - `on_brightness` is used when HDR is switched on (via `on` or `toggle` landing in on). Omitting this key (or setting it to `null`) disables the feature — brightness is left unchanged when HDR is turned on.
+- `suspend_night_light` controls whether KDE Night Light is inhibited while HDR is on and resumed when HDR is off. Defaults to `false`. When enabled, Night Light is inhibited (via its DBus interface) each time HDR turns on, and uninhibited each time HDR turns off.
 - CLI `--off-brightness` / `--on-brightness` override the respective config values for that command invocation.
 - CLI `--no-off-brightness` / `--no-on-brightness` skip brightness adjustment for that invocation regardless of config.
+- CLI `--suspend-night-light` / `--no-suspend-night-light` override the `suspend_night_light` config value for that invocation.
 
 ## Autostart Tray On Login
 

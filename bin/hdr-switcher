@@ -22,6 +22,7 @@ APP_NAME = "HDR Switcher"
 DEFAULT_OFF_BRIGHTNESS = 100
 CONFIG_DIR = Path.home() / ".config" / "hdr-switcher"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+NIGHT_LIGHT_COOKIE_FILE = CONFIG_DIR / ".night_light_cookie"
 
 
 def _bounded_int(value: object, lo: int, hi: int) -> int | None:
@@ -85,6 +86,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Do not change brightness when switching HDR on.",
     )
+    parser.add_argument(
+        "--suspend-night-light",
+        action="store_true",
+        default=None,
+        help="Suspend Night Light when HDR is on, resume when HDR is off. Overrides settings file.",
+    )
+    parser.add_argument(
+        "--no-suspend-night-light",
+        action="store_true",
+        help="Do not suspend Night Light when switching HDR.",
+    )
     return parser
 
 
@@ -110,6 +122,69 @@ def load_on_brightness() -> int | None:
     except (FileNotFoundError, OSError, json.JSONDecodeError):
         pass
     return None
+
+
+def load_suspend_night_light() -> bool:
+    """Return True if suspend_night_light is enabled in config, else False."""
+    try:
+        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        return bool(data.get("suspend_night_light", False))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        pass
+    return False
+
+
+def set_night_light_inhibited(inhibit: bool) -> None:
+    """Inhibit or uninhibit KDE Night Light via DBus (busctl)."""
+    busctl = shutil.which("busctl")
+    if not busctl:
+        return
+    if inhibit:
+        try:
+            result = subprocess.run(
+                [
+                    busctl, "--user", "call",
+                    "org.kde.KWin", "/org/kde/KWin/NightLight",
+                    "org.kde.KWin.NightLight", "inhibit",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            # Output is like "u 42\n"; extract the cookie value
+            parts = result.stdout.strip().split()
+            if len(parts) >= 2:
+                cookie = parts[-1]
+                CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+                NIGHT_LIGHT_COOKIE_FILE.write_text(cookie, encoding="utf-8")
+        except (OSError, subprocess.CalledProcessError):
+            pass
+    else:
+        if not NIGHT_LIGHT_COOKIE_FILE.exists():
+            return
+        try:
+            cookie = NIGHT_LIGHT_COOKIE_FILE.read_text(encoding="utf-8").strip()
+        except OSError:
+            return
+        try:
+            NIGHT_LIGHT_COOKIE_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+        if not cookie:
+            return
+        try:
+            subprocess.run(
+                [
+                    busctl, "--user", "call",
+                    "org.kde.KWin", "/org/kde/KWin/NightLight",
+                    "org.kde.KWin.NightLight", "uninhibit", "u", cookie,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except OSError:
+            pass
 
 
 def icon_for_state(state: str) -> str | None:
@@ -239,6 +314,13 @@ def main() -> int:
     if on_brightness is not None and not 0 <= on_brightness <= 100:
         parser.error("--on-brightness must be between 0 and 100")
 
+    if args.suspend_night_light:
+        suspend_night_light = True
+    elif args.no_suspend_night_light:
+        suspend_night_light = False
+    else:
+        suspend_night_light = load_suspend_night_light()
+
     try:
         outputs = read_hdr_outputs()
     except json.JSONDecodeError as exc:
@@ -274,6 +356,12 @@ def main() -> int:
     try:
         apply_action(args.action, outputs)
         updated = read_hdr_outputs()
+        new_state = describe_state(updated)
+        if suspend_night_light:
+            if new_state == "on":
+                set_night_light_inhibited(True)
+            elif new_state == "off":
+                set_night_light_inhibited(False)
         brightness_applied: list[str] = []
         brightness_unsupported: list[str] = []
         if args.action in {"off", "toggle"} and not args.no_off_brightness:
