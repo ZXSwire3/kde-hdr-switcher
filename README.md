@@ -11,7 +11,8 @@ It is built around KDE's `kscreen-doctor`, so it uses Plasma's native display co
 - Enable, disable, or toggle HDR on all connected + enabled HDR-capable outputs.
 - Optional status notifications with custom HDR on/off icons.
 - Automatic brightness handling when HDR is off (default: `100%`).
-- Tray settings menu to configure HDR-off brightness and persist it.
+- Optional brightness setting when HDR is on (disabled by default; configure in settings).
+- Tray settings menu to configure HDR-off and HDR-on brightness and persist them.
 - User-local install (`~/.local`), no root required.
 
 ## Requirements
@@ -74,7 +75,9 @@ Common flags:
 
 ```bash
 hdr-switcher off --off-brightness 85
+hdr-switcher on --on-brightness 80
 hdr-switcher toggle --no-off-brightness
+hdr-switcher toggle --no-on-brightness
 hdr-switcher status --no-notify
 ```
 
@@ -104,7 +107,7 @@ Right-click the tray icon for:
 - `Settings`
 - `Refresh Status`
 
-Tray settings include preset brightness values and `Set Custom...` for HDR-off brightness.
+Tray settings include preset brightness values and `Set Custom...` for both HDR-off and HDR-on brightness.
 
 ## Configuration
 
@@ -116,13 +119,16 @@ Current keys:
 
 ```json
 {
-  "off_brightness": 100
+  "off_brightness": 100,
+  "on_brightness": 80
 }
 ```
 
 Behavior:
 - `off_brightness` is used when HDR is switched off (via `off` or `toggle` landing in off).
-- CLI `--off-brightness` overrides config for that command invocation.
+- `on_brightness` is used when HDR is switched on (via `on` or `toggle` landing in on). Omitting this key (or setting it to `null`) disables the feature — brightness is left unchanged when HDR is turned on.
+- CLI `--off-brightness` / `--on-brightness` override the respective config values for that command invocation.
+- CLI `--no-off-brightness` / `--no-on-brightness` skip brightness adjustment for that invocation regardless of config.
 
 ## Autostart Tray On Login
 
