@@ -132,7 +132,7 @@ Current keys:
 Behavior:
 - `off_brightness` is used when HDR is switched off (via `off` or `toggle` landing in off).
 - `on_brightness` is used when HDR is switched on (via `on` or `toggle` landing in on). Omitting this key (or setting it to `null`) disables the feature — brightness is left unchanged when HDR is turned on.
-- `suspend_night_light` controls whether KDE Night Light is toggled while HDR is on and toggled back when HDR is off. Defaults to `false`. When enabled, the script runs `qdbus6 org.kde.kglobalaccel /component/kwin invokeShortcut "Toggle Night Color"` when HDR turns on, records that state, and runs the same command again when HDR turns off to restore Night Light.
+- `suspend_night_light` controls whether KDE Night Light is toggled while HDR is on and toggled back when HDR is off. Defaults to `false`. When enabled, the script first checks Night Light state with `qdbus6 org.kde.KWin.NightLight /org/kde/KWin/NightLight org.kde.KWin.NightLight.running`, then runs `qdbus6 org.kde.kglobalaccel /component/kwin invokeShortcut "Toggle Night Color"` only when a toggle is needed, records that state, and later runs the same toggle command to restore Night Light.
 - CLI `--off-brightness` / `--on-brightness` override the respective config values for that command invocation.
 - CLI `--no-off-brightness` / `--no-on-brightness` skip brightness adjustment for that invocation regardless of config.
 - CLI `--suspend-night-light` / `--no-suspend-night-light` override the `suspend_night_light` config value for that invocation.

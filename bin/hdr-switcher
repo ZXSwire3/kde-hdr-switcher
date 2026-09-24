@@ -137,10 +137,30 @@ def load_suspend_night_light() -> bool:
 def set_night_light_inhibited(inhibit: bool) -> None:
     """Toggle KDE Night Color through the KWin global shortcut."""
 
+    qdbus = shutil.which("qdbus6")
+    if not qdbus:
+        raise OSError("qdbus6 is required for Night Light control.")
+
+    def _is_running() -> bool | None:
+        result = subprocess.run(
+            [
+                qdbus,
+                "org.kde.KWin.NightLight",
+                "/org/kde/KWin/NightLight",
+                "org.kde.KWin.NightLight.running",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        output = result.stdout.strip().lower()
+        if "true" in output:
+            return True
+        if "false" in output:
+            return False
+        return None
+
     def _toggle() -> None:
-        qdbus = shutil.which("qdbus6")
-        if not qdbus:
-            raise OSError("qdbus6 is required for Night Light control.")
         subprocess.run(
             [qdbus, "org.kde.kglobalaccel", "/component/kwin", "invokeShortcut", "Toggle Night Color"],
             check=True,
@@ -153,6 +173,8 @@ def set_night_light_inhibited(inhibit: bool) -> None:
         if NIGHT_LIGHT_COOKIE_FILE.exists():
             return
         try:
+            if _is_running() is not True:
+                return
             _toggle()
             CONFIG_DIR.mkdir(parents=True, exist_ok=True)
             NIGHT_LIGHT_COOKIE_FILE.write_text("toggled\n", encoding="utf-8")
@@ -162,6 +184,12 @@ def set_night_light_inhibited(inhibit: bool) -> None:
         if not NIGHT_LIGHT_COOKIE_FILE.exists():
             return
         try:
+            running = _is_running()
+            if running is True:
+                NIGHT_LIGHT_COOKIE_FILE.unlink(missing_ok=True)
+                return
+            if running is not False:
+                return
             _toggle()
             NIGHT_LIGHT_COOKIE_FILE.unlink(missing_ok=True)
         except (OSError, subprocess.CalledProcessError):
