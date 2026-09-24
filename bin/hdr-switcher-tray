@@ -25,7 +25,7 @@ from gi.repository import AppIndicator3, GLib, Gtk
 APP_ID = "hdr-switcher-tray"
 APP_NAME = "HDR Switcher Tray"
 DEFAULT_OFF_BRIGHTNESS = 100
-BRIGHTNESS_PRESETS = [100, 95, 90, 85, 80]
+BRIGHTNESS_STEP = 10
 CONFIG_DIR = Path.home() / ".config" / "hdr-switcher"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
@@ -140,7 +140,7 @@ class HdrTray:
         if self.on_brightness is not None and not 0 <= self.on_brightness <= 100:
             self.on_brightness = None
         self.suspend_night_light: bool = bool(self.settings.get("suspend_night_light", False))
-        self._updating_radios = False
+        self._syncing_controls = False
 
         self.indicator = AppIndicator3.Indicator.new(
             APP_ID,
@@ -174,54 +174,57 @@ class HdrTray:
         self.menu.append(self.settings_item)
 
         # --- HDR-off brightness section ---
+        self.off_section_item = Gtk.MenuItem(label="When HDR turns OFF")
+        self.off_section_item.set_sensitive(False)
+        self.settings_menu.append(self.off_section_item)
         self.brightness_info_item = Gtk.MenuItem(label="")
         self.brightness_info_item.set_sensitive(False)
         self.settings_menu.append(self.brightness_info_item)
-        self.settings_menu.append(Gtk.SeparatorMenuItem())
-
-        self.preset_items: dict[int, Gtk.RadioMenuItem] = {}
-        group: Gtk.RadioMenuItem | None = None
-        for value in BRIGHTNESS_PRESETS:
-            if group is None:
-                item = Gtk.RadioMenuItem.new_with_label(None, f"{value}%")
-                group = item
-            else:
-                item = Gtk.RadioMenuItem.new_with_label_from_widget(group, f"{value}%")
-            item.connect("toggled", self._on_preset_toggled, value)
-            self.settings_menu.append(item)
-            self.preset_items[value] = item
-
-        self.settings_menu.append(Gtk.SeparatorMenuItem())
-        self.custom_brightness_item = Gtk.MenuItem(label="Set Custom...")
-        self.custom_brightness_item.connect("activate", self._on_custom_brightness)
-        self.settings_menu.append(self.custom_brightness_item)
+        self.off_range_hint_item = Gtk.MenuItem(label="Range: 0-100%")
+        self.off_range_hint_item.set_sensitive(False)
+        self.settings_menu.append(self.off_range_hint_item)
+        self.off_controls_item, self.off_scale, self.off_spin = self._build_brightness_controls(
+            value=self.off_brightness,
+            on_slider_changed=self._on_off_slider_changed,
+            on_slider_apply=self._on_off_slider_apply,
+            on_spin_changed=self._on_off_spin_changed,
+            on_spin_apply=self._on_off_spin_apply,
+            on_decrease=self._on_off_decrease,
+            on_increase=self._on_off_increase,
+        )
+        self.settings_menu.append(self.off_controls_item)
+        self.off_reset_item = Gtk.MenuItem(label="Reset HDR-off brightness to default (100%)")
+        self.off_reset_item.connect("activate", self._on_reset_off_brightness)
+        self.settings_menu.append(self.off_reset_item)
 
         # --- HDR-on brightness section ---
         self.settings_menu.append(Gtk.SeparatorMenuItem())
+        self.on_section_item = Gtk.MenuItem(label="When HDR turns ON")
+        self.on_section_item.set_sensitive(False)
+        self.settings_menu.append(self.on_section_item)
         self.on_brightness_info_item = Gtk.MenuItem(label="")
         self.on_brightness_info_item.set_sensitive(False)
         self.settings_menu.append(self.on_brightness_info_item)
-        self.settings_menu.append(Gtk.SeparatorMenuItem())
-
-        self.on_preset_items: dict[int | None, Gtk.RadioMenuItem] = {}
-        on_group: Gtk.RadioMenuItem | None = None
-        # "Disabled" option (None sentinel)
-        disabled_item = Gtk.RadioMenuItem.new_with_label(None, "Disabled")
-        on_group = disabled_item
-        disabled_item.connect("toggled", self._on_on_preset_toggled, None)
-        self.settings_menu.append(disabled_item)
-        self.on_preset_items[None] = disabled_item
-
-        for value in BRIGHTNESS_PRESETS:
-            item = Gtk.RadioMenuItem.new_with_label_from_widget(on_group, f"{value}%")
-            item.connect("toggled", self._on_on_preset_toggled, value)
-            self.settings_menu.append(item)
-            self.on_preset_items[value] = item
-
-        self.settings_menu.append(Gtk.SeparatorMenuItem())
-        self.on_custom_brightness_item = Gtk.MenuItem(label="Set Custom...")
-        self.on_custom_brightness_item.connect("activate", self._on_custom_on_brightness)
-        self.settings_menu.append(self.on_custom_brightness_item)
+        self.on_range_hint_item = Gtk.MenuItem(label="Range: 0-100%")
+        self.on_range_hint_item.set_sensitive(False)
+        self.settings_menu.append(self.on_range_hint_item)
+        self.enable_on_brightness_item = Gtk.CheckMenuItem(label="Set brightness when HDR turns ON")
+        self.enable_on_brightness_item.set_active(self.on_brightness is not None)
+        self.enable_on_brightness_item.connect("toggled", self._on_enable_on_brightness_toggled)
+        self.settings_menu.append(self.enable_on_brightness_item)
+        self.on_controls_item, self.on_scale, self.on_spin = self._build_brightness_controls(
+            value=self.on_brightness if self.on_brightness is not None else DEFAULT_OFF_BRIGHTNESS,
+            on_slider_changed=self._on_on_slider_changed,
+            on_slider_apply=self._on_on_slider_apply,
+            on_spin_changed=self._on_on_spin_changed,
+            on_spin_apply=self._on_on_spin_apply,
+            on_decrease=self._on_on_decrease,
+            on_increase=self._on_on_increase,
+        )
+        self.settings_menu.append(self.on_controls_item)
+        self.on_reset_item = Gtk.MenuItem(label="Reset HDR-on brightness to default (100%)")
+        self.on_reset_item.connect("activate", self._on_reset_on_brightness)
+        self.settings_menu.append(self.on_reset_item)
 
         # --- Night Light suspension ---
         self.settings_menu.append(Gtk.SeparatorMenuItem())
@@ -303,20 +306,89 @@ class HdrTray:
         self.refresh_state()
         return True
 
+    def _build_brightness_controls(
+        self,
+        value: int,
+        on_slider_changed,
+        on_slider_apply,
+        on_spin_changed,
+        on_spin_apply,
+        on_decrease,
+        on_increase,
+    ) -> tuple[Gtk.MenuItem, Gtk.Scale, Gtk.SpinButton]:
+        item = Gtk.MenuItem()
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        box.set_border_width(4)
+
+        dec_button = Gtk.Button.new_with_label("-10")
+        dec_button.set_relief(Gtk.ReliefStyle.NONE)
+        dec_button.connect("clicked", on_decrease)
+        box.pack_start(dec_button, False, False, 0)
+
+        adjustment = Gtk.Adjustment(value=value, lower=0, upper=100, step_increment=1, page_increment=10, page_size=0)
+        scale = Gtk.Scale.new(Gtk.Orientation.HORIZONTAL, adjustment)
+        scale.set_digits(0)
+        scale.set_draw_value(False)
+        scale.set_hexpand(True)
+        scale.set_size_request(180, -1)
+        scale.set_increments(1, BRIGHTNESS_STEP)
+        for mark in range(0, 101, BRIGHTNESS_STEP):
+            scale.add_mark(mark, Gtk.PositionType.BOTTOM, None)
+        scale.connect("value-changed", on_slider_changed)
+        scale.connect("button-release-event", on_slider_apply)
+        scale.connect("key-release-event", on_slider_apply)
+        box.pack_start(scale, True, True, 0)
+
+        inc_button = Gtk.Button.new_with_label("+10")
+        inc_button.set_relief(Gtk.ReliefStyle.NONE)
+        inc_button.connect("clicked", on_increase)
+        box.pack_start(inc_button, False, False, 0)
+
+        spin = Gtk.SpinButton.new_with_range(0, 100, 1)
+        spin.set_numeric(True)
+        spin.set_update_policy(Gtk.SpinButtonUpdatePolicy.IF_VALID)
+        spin.set_width_chars(4)
+        spin.set_value(float(value))
+        spin.connect("value-changed", on_spin_changed)
+        spin.connect("activate", on_spin_apply)
+        spin.connect("focus-out-event", on_spin_apply)
+        box.pack_start(spin, False, False, 0)
+
+        item.add(box)
+        return item, scale, spin
+
+    @staticmethod
+    def _clamp_brightness(value: int) -> int:
+        return max(0, min(100, value))
+
+    def _sync_slider_spin(self, scale: Gtk.Scale, spin: Gtk.SpinButton, value: int) -> None:
+        self._syncing_controls = True
+        scale.set_value(float(value))
+        spin.set_value(float(value))
+        self._syncing_controls = False
+
+    def _set_on_controls_enabled(self, enabled: bool) -> None:
+        self.on_controls_item.set_sensitive(enabled)
+        self.on_reset_item.set_sensitive(enabled)
+
     def _sync_settings_menu(self) -> None:
-        self.brightness_info_item.set_label(f"HDR-off brightness: {self.off_brightness}%")
+        self.brightness_info_item.set_label(f"Current: {self.off_brightness}%")
+        self._sync_slider_spin(self.off_scale, self.off_spin, self.off_brightness)
+
         on_label = f"{self.on_brightness}%" if self.on_brightness is not None else "Disabled"
-        self.on_brightness_info_item.set_label(f"HDR-on brightness: {on_label}")
-        self._updating_radios = True
-        for value, item in self.preset_items.items():
-            item.set_active(value == self.off_brightness)
-        for value, item in self.on_preset_items.items():
-            item.set_active(value == self.on_brightness)
-        self._updating_radios = False
+        self.on_brightness_info_item.set_label(f"Current: {on_label}")
+        self._sync_slider_spin(
+            self.on_scale,
+            self.on_spin,
+            self.on_brightness if self.on_brightness is not None else int(self.on_scale.get_value()),
+        )
+        self._syncing_controls = True
+        self.enable_on_brightness_item.set_active(self.on_brightness is not None)
+        self._syncing_controls = False
+        self._set_on_controls_enabled(self.on_brightness is not None)
 
     def _set_off_brightness(self, value: int) -> None:
-        if not 0 <= value <= 100:
-            return
+        value = self._clamp_brightness(value)
         self.off_brightness = value
         self.settings["off_brightness"] = value
         try:
@@ -326,8 +398,8 @@ class HdrTray:
         self._sync_settings_menu()
 
     def _set_on_brightness(self, value: int | None) -> None:
-        if value is not None and not 0 <= value <= 100:
-            return
+        if value is not None:
+            value = self._clamp_brightness(value)
         self.on_brightness = value
         self.settings["on_brightness"] = value
         try:
@@ -344,66 +416,84 @@ class HdrTray:
         except OSError:
             pass
 
-    def _on_preset_toggled(self, menu_item: Gtk.RadioMenuItem, value: int) -> None:
-        if self._updating_radios or not menu_item.get_active():
-            return
-        self._set_off_brightness(value)
-
-    def _on_on_preset_toggled(self, menu_item: Gtk.RadioMenuItem, value: int | None) -> None:
-        if self._updating_radios or not menu_item.get_active():
-            return
-        self._set_on_brightness(value)
-
     def _on_suspend_night_light_toggled(self, menu_item: Gtk.CheckMenuItem) -> None:
         self._set_suspend_night_light(menu_item.get_active())
 
-    def _prompt_custom_brightness(self, current: int) -> int | None:
-        dialog = Gtk.Dialog(title="HDR Off Brightness", flags=0)
-        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
-        dialog.add_button("Save", Gtk.ResponseType.OK)
-        content = dialog.get_content_area()
-        label = Gtk.Label(label="Set brightness percent used when HDR is off (0-100):")
-        label.set_halign(Gtk.Align.START)
-        spin = Gtk.SpinButton.new_with_range(0, 100, 1)
-        spin.set_value(float(current))
-        spin.set_numeric(True)
-        content.pack_start(label, False, False, 6)
-        content.pack_start(spin, False, False, 6)
-        dialog.show_all()
-        response = dialog.run()
-        value = int(spin.get_value()) if response == Gtk.ResponseType.OK else None
-        dialog.destroy()
-        return value
-
-    def _on_custom_brightness(self, _menu_item: Gtk.MenuItem) -> None:
-        value = self._prompt_custom_brightness(self.off_brightness)
-        if value is None:
+    def _on_off_slider_changed(self, scale: Gtk.Scale) -> None:
+        if self._syncing_controls:
             return
-        self._set_off_brightness(value)
+        self._sync_slider_spin(scale, self.off_spin, int(round(scale.get_value())))
 
-    def _prompt_custom_on_brightness(self, current: int | None) -> int | None:
-        dialog = Gtk.Dialog(title="HDR On Brightness", flags=0)
-        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
-        dialog.add_button("Save", Gtk.ResponseType.OK)
-        content = dialog.get_content_area()
-        label = Gtk.Label(label="Set brightness percent used when HDR is on (0-100):")
-        label.set_halign(Gtk.Align.START)
-        spin = Gtk.SpinButton.new_with_range(0, 100, 1)
-        spin.set_value(float(current if current is not None else DEFAULT_OFF_BRIGHTNESS))
-        spin.set_numeric(True)
-        content.pack_start(label, False, False, 6)
-        content.pack_start(spin, False, False, 6)
-        dialog.show_all()
-        response = dialog.run()
-        value = int(spin.get_value()) if response == Gtk.ResponseType.OK else None
-        dialog.destroy()
-        return value
+    def _on_off_slider_apply(self, scale: Gtk.Scale, *_args) -> bool:
+        self._set_off_brightness(int(round(scale.get_value())))
+        return False
 
-    def _on_custom_on_brightness(self, _menu_item: Gtk.MenuItem) -> None:
-        value = self._prompt_custom_on_brightness(self.on_brightness)
-        if value is None:
+    def _on_off_spin_changed(self, spin: Gtk.SpinButton) -> None:
+        if self._syncing_controls:
             return
-        self._set_on_brightness(value)
+        self._sync_slider_spin(self.off_scale, spin, spin.get_value_as_int())
+
+    def _on_off_spin_apply(self, spin: Gtk.SpinButton, *_args) -> bool:
+        self._set_off_brightness(spin.get_value_as_int())
+        return False
+
+    def _on_off_decrease(self, _button: Gtk.Button) -> None:
+        self._set_off_brightness(self.off_brightness - BRIGHTNESS_STEP)
+
+    def _on_off_increase(self, _button: Gtk.Button) -> None:
+        self._set_off_brightness(self.off_brightness + BRIGHTNESS_STEP)
+
+    def _on_reset_off_brightness(self, _menu_item: Gtk.MenuItem) -> None:
+        self._set_off_brightness(DEFAULT_OFF_BRIGHTNESS)
+
+    def _on_enable_on_brightness_toggled(self, menu_item: Gtk.CheckMenuItem) -> None:
+        if self._syncing_controls:
+            return
+        if menu_item.get_active():
+            self._set_on_brightness(self.on_spin.get_value_as_int())
+        else:
+            self._set_on_brightness(None)
+
+    def _on_on_slider_changed(self, scale: Gtk.Scale) -> None:
+        if self._syncing_controls:
+            return
+        self._sync_slider_spin(scale, self.on_spin, int(round(scale.get_value())))
+
+    def _on_on_slider_apply(self, scale: Gtk.Scale, *_args) -> bool:
+        if self.on_brightness is None:
+            return False
+        self._set_on_brightness(int(round(scale.get_value())))
+        return False
+
+    def _on_on_spin_changed(self, spin: Gtk.SpinButton) -> None:
+        if self._syncing_controls:
+            return
+        self._sync_slider_spin(self.on_scale, spin, spin.get_value_as_int())
+
+    def _on_on_spin_apply(self, spin: Gtk.SpinButton, *_args) -> bool:
+        if self.on_brightness is None:
+            return False
+        self._set_on_brightness(spin.get_value_as_int())
+        return False
+
+    def _on_on_decrease(self, _button: Gtk.Button) -> None:
+        base = self.on_brightness if self.on_brightness is not None else self.on_spin.get_value_as_int()
+        next_val = self._clamp_brightness(base - BRIGHTNESS_STEP)
+        if self.on_brightness is None:
+            self._sync_slider_spin(self.on_scale, self.on_spin, next_val)
+            return
+        self._set_on_brightness(next_val)
+
+    def _on_on_increase(self, _button: Gtk.Button) -> None:
+        base = self.on_brightness if self.on_brightness is not None else self.on_spin.get_value_as_int()
+        next_val = self._clamp_brightness(base + BRIGHTNESS_STEP)
+        if self.on_brightness is None:
+            self._sync_slider_spin(self.on_scale, self.on_spin, next_val)
+            return
+        self._set_on_brightness(next_val)
+
+    def _on_reset_on_brightness(self, _menu_item: Gtk.MenuItem) -> None:
+        self._set_on_brightness(DEFAULT_OFF_BRIGHTNESS)
 
     def _on_quit(self, _menu_item: Gtk.MenuItem) -> None:
         Gtk.main_quit()

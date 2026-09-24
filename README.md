@@ -111,7 +111,7 @@ Right-click the tray icon for:
 - `Settings`
 - `Refresh Status`
 
-Tray settings include preset brightness values and `Set Custom...` for both HDR-off and HDR-on brightness.
+Tray settings include per-mode brightness controls with a 0-100 slider (10-step notch marks), direct numeric entry, ±10 quick-adjust buttons, reset actions, and an explicit toggle for enabling HDR-on brightness.
 
 ## Configuration
 
