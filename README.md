@@ -22,7 +22,7 @@ It is built around KDE's `kscreen-doctor`, so it uses Plasma's native display co
 - `kscreen-doctor` in `PATH`.
 - `python3`.
 - `notify-send` for desktop notifications (optional).
-- For Night Light suspension support (optional): `qdbus6`/`qdbus` (preferred) or `busctl`.
+- For Night Light suspension support (optional): `qdbus6`.
 - For tray mode:
   - Python GObject bindings (`gi` / `PyGObject`)
   - GTK 3
@@ -132,7 +132,7 @@ Current keys:
 Behavior:
 - `off_brightness` is used when HDR is switched off (via `off` or `toggle` landing in off).
 - `on_brightness` is used when HDR is switched on (via `on` or `toggle` landing in on). Omitting this key (or setting it to `null`) disables the feature — brightness is left unchanged when HDR is turned on.
-- `suspend_night_light` controls whether KDE Night Light is inhibited while HDR is on and resumed when HDR is off. Defaults to `false`. When enabled, Night Light is inhibited (via its DBus interface) each time HDR turns on, and uninhibited each time HDR turns off.
+- `suspend_night_light` controls whether KDE Night Light is toggled while HDR is on and toggled back when HDR is off. Defaults to `false`. When enabled, the script runs `qdbus6 org.kde.kglobalaccel /component/kwin invokeShortcut "Toggle Night Color"` when HDR turns on, records that state, and runs the same command again when HDR turns off to restore Night Light.
 - CLI `--off-brightness` / `--on-brightness` override the respective config values for that command invocation.
 - CLI `--no-off-brightness` / `--no-on-brightness` skip brightness adjustment for that invocation regardless of config.
 - CLI `--suspend-night-light` / `--no-suspend-night-light` override the `suspend_night_light` config value for that invocation.
