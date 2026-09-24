@@ -22,6 +22,7 @@ It is built around KDE's `kscreen-doctor`, so it uses Plasma's native display co
 - `kscreen-doctor` in `PATH`.
 - `python3`.
 - `notify-send` for desktop notifications (optional).
+- For Night Light suspension support (optional): `qdbus6`/`qdbus` (preferred) or `busctl`.
 - For tray mode:
   - Python GObject bindings (`gi` / `PyGObject`)
   - GTK 3

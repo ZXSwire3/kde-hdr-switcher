@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -135,26 +136,41 @@ def load_suspend_night_light() -> bool:
 
 
 def set_night_light_inhibited(inhibit: bool) -> None:
-    """Inhibit or uninhibit KDE Night Light via DBus (busctl)."""
-    busctl = shutil.which("busctl")
-    if not busctl:
-        return
+    """Inhibit or uninhibit KDE Night Light via KDE's native DBus interface."""
+    service = "org.kde.KWin"
+    path = "/org/kde/KWin/NightLight"
+    interface = "org.kde.KWin.NightLight"
+
+    def _call(method: str, cookie: str | None = None) -> str:
+        qdbus = shutil.which("qdbus6") or shutil.which("qdbus")
+        if qdbus:
+            cmd = [qdbus, service, path, f"{interface}.{method}"]
+            if cookie is not None:
+                cmd.append(cookie)
+        else:
+            busctl = shutil.which("busctl")
+            if not busctl:
+                raise OSError("No DBus client found for Night Light control.")
+            cmd = [busctl, "--user", "call", service, path, interface, method]
+            if cookie is not None:
+                cmd.extend(["u", cookie])
+        result = subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip()
+
     if inhibit:
+        if NIGHT_LIGHT_COOKIE_FILE.exists():
+            return
         try:
-            result = subprocess.run(
-                [
-                    busctl, "--user", "call",
-                    "org.kde.KWin", "/org/kde/KWin/NightLight",
-                    "org.kde.KWin.NightLight", "inhibit",
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            # Output is like "u 42\n"; extract the cookie value
-            parts = result.stdout.strip().split()
-            if len(parts) >= 2:
-                cookie = parts[-1]
+            output = _call("inhibit")
+            # qdbus output is usually "42", busctl output is usually "u 42"
+            match = re.search(r"\b(\d+)\b", output)
+            if match:
+                cookie = match.group(1)
                 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
                 NIGHT_LIGHT_COOKIE_FILE.write_text(cookie, encoding="utf-8")
         except (OSError, subprocess.CalledProcessError):
@@ -166,24 +182,12 @@ def set_night_light_inhibited(inhibit: bool) -> None:
             cookie = NIGHT_LIGHT_COOKIE_FILE.read_text(encoding="utf-8").strip()
         except OSError:
             return
-        try:
-            NIGHT_LIGHT_COOKIE_FILE.unlink(missing_ok=True)
-        except OSError:
-            pass
         if not cookie:
             return
         try:
-            subprocess.run(
-                [
-                    busctl, "--user", "call",
-                    "org.kde.KWin", "/org/kde/KWin/NightLight",
-                    "org.kde.KWin.NightLight", "uninhibit", "u", cookie,
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-        except OSError:
+            _call("uninhibit", cookie)
+            NIGHT_LIGHT_COOKIE_FILE.unlink(missing_ok=True)
+        except (OSError, subprocess.CalledProcessError):
             pass
 
 
